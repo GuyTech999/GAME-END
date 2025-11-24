@@ -233,6 +233,7 @@
 
         #btn-left { bottom: 20px; left: 20px; }
         #btn-right { bottom: 20px; left: 100px; }
+        #btn-crouch { bottom: 20px; left: 180px; } /* ปุ่มก้มตัวใหม่ */
         #btn-jump { bottom: 40px; right: 20px; }
         #btn-shoot { bottom: 20px; right: 100px; background: rgba(255, 0, 0, 0.3); }
 
@@ -273,6 +274,7 @@
         <div id="mobile-controls">
             <div id="btn-left" class="control-btn">◄</div>
             <div id="btn-right" class="control-btn">►</div>
+            <div id="btn-crouch" class="control-btn">▼</div> <!-- ปุ่มก้มตัว -->
             <div id="btn-shoot" class="control-btn">●</div>
             <div id="btn-jump" class="control-btn">▲</div>
         </div>
@@ -282,7 +284,7 @@
     <div id="start-screen" class="screen">
         <h1>Soldier Frontline</h1>
         <p>ยิงศัตรู หลบสิ่งกีดขวาง และเอาชีวิตรอดจากบอส</p>
-        <p style="font-size: 14px; color: #aaa;">PC: A/D เดิน, Space/W กระโดด (2 จังหวะ), คลิก ยิง<br>Mobile: ปุ่มบนหน้าจอ</p>
+        <p style="font-size: 14px; color: #aaa;">PC: A/D เดิน, S ก้มตัว, Space/W กระโดด (กด 2 ครั้งได้เลย), คลิก ยิง<br>Mobile: ปุ่มบนหน้าจอ (แตะ 2 ครั้ง)</p>
         <div style="margin-bottom: 20px;">High Score: <span id="high-score">0</span></div>
         <button class="btn" onclick="startGame()">DEPLOY (เริ่มเกม)</button>
     </div>
@@ -316,7 +318,7 @@ let nextBossScore = 1000; // Target score to spawn boss
 let gravity = 0.6;
 let floorY = 0;
 let cameraX = 0;
-let gameSpeed = 0; // Speed of auto-scrolling (if any) or camera follow
+let gameSpeed = 0; 
 
 // Weather
 let weather = 'CLEAR'; // CLEAR, RAIN, ACID_RAIN
@@ -340,7 +342,10 @@ let enemySpawnTimer = 0;
 const keys = {
     a: false, d: false, w: false, s: false, space: false, mouse: false
 };
-const mousePos = { x: 0, y: 0 };
+// ตัวแปรสำหรับตรวจจับการกดปุ่มครั้งใหม่ (Rising Edge Detection)
+const keys_last = {
+    a: false, d: false, w: false, s: false, space: false, mouse: false
+};
 
 // Setup Canvas
 function resize() {
@@ -355,11 +360,13 @@ resize();
 window.addEventListener('keydown', e => {
     if(e.key === 'a' || e.key === 'A') keys.a = true;
     if(e.key === 'd' || e.key === 'D') keys.d = true;
+    if(e.key === 's' || e.key === 'S') keys.s = true; // เพิ่มปุ่ม S สำหรับก้มตัว
     if(e.key === 'w' || e.key === 'W' || e.key === ' ') keys.space = true;
 });
 window.addEventListener('keyup', e => {
     if(e.key === 'a' || e.key === 'A') keys.a = false;
     if(e.key === 'd' || e.key === 'D') keys.d = false;
+    if(e.key === 's' || e.key === 'S') keys.s = false; // เพิ่มปุ่ม S สำหรับก้มตัว
     if(e.key === 'w' || e.key === 'W' || e.key === ' ') keys.space = false;
 });
 window.addEventListener('mousedown', () => keys.mouse = true);
@@ -382,6 +389,7 @@ if (isMobile) {
 
     bindTouch('btn-left', 'a');
     bindTouch('btn-right', 'd');
+    bindTouch('btn-crouch', 's'); // ผูกปุ่มก้มตัวใหม่
     bindTouch('btn-jump', 'space');
     bindTouch('btn-shoot', 'mouse');
 }
@@ -413,54 +421,85 @@ class Platform {
 
 class Player {
     constructor() {
+        this.initialH = 70; // ความสูงปกติ
+        this.crouchH = 40; // ความสูงเมื่อก้มตัว
         this.w = 40;
-        this.h = 70;
+        this.h = this.initialH;
         this.x = 100;
         this.y = floorY - this.h;
         this.vx = 0;
         this.vy = 0;
-        this.speed = 5;
-        this.jumpPower = -12; 
+        this.baseSpeed = 2.0;
+        this.speed = this.baseSpeed;
+        this.jumpPower = -10; // <<--- ปรับตรงนี้ให้สูงขึ้นจาก -8 เป็น -10
         this.color = '#3498db';
         this.maxHp = 100;
         this.hp = 100;
         this.shield = 0;
-        this.damage = 20; // Base damage adjusted to 20
+        this.damage = 20; 
         this.gunLevel = 1;
         this.facingRight = true;
         this.lastShot = 0;
-        this.fireRate = 15; 
+        this.fireRate = 30; 
         this.isGrounded = true;
+        this.isCrouching = false;
         
-        // Double Jump Logic
+        // Double Jump Logic State
         this.jumpCount = 0;
         this.maxJumps = 2;
-        this.jumpReleased = true; // To prevent machine-gun jumping when holding key
     }
 
     update() {
-        // Movement
+        // --- 1. Crouch Logic (ก้มตัว) ---
+        const isCrouchInput = keys.s;
+        
+        if (isCrouchInput && this.isGrounded) {
+            this.isCrouching = true;
+            this.h = this.crouchH;
+            this.speed = this.baseSpeed * 0.5; // ความเร็วลดลงครึ่งนึงเมื่อก้ม
+        } else {
+            // เช็คว่าสามารถยืนขึ้นได้ไหม (ในเกมนี้ไม่มีเพดาน จึงยืนขึ้นได้เสมอ)
+            this.isCrouching = false;
+            this.h = this.initialH;
+            this.speed = this.baseSpeed;
+        }
+
+        // ปรับตำแหน่ง Y ให้ติดพื้นเสมอเมื่อความสูงเปลี่ยน
+        if (this.y + this.h > floorY) {
+            this.y = floorY - this.h;
+        }
+
+        // --- 2. Movement ---
         if (keys.a) { this.vx = -this.speed; this.facingRight = false; }
         else if (keys.d) { this.vx = this.speed; this.facingRight = true; }
         else { this.vx *= 0.8; } // Friction
 
-        // Double Jump Logic
-        if (keys.space) {
-            if (this.jumpReleased && this.jumpCount < this.maxJumps) {
-                this.vy = this.jumpPower;
-                this.isGrounded = false;
-                this.jumpCount++;
-                this.jumpReleased = false; // Mark key as pressed
+        // --- 3. UPDATED Double Jump Logic (ใช้ Rising Edge) ---
+        // ตรวจสอบว่า Space/W ถูกกดใหม่ในเฟรมนี้หรือไม่
+        const isSpaceNewlyPressed = keys.space && !keys_last.space;
+        
+        if (isSpaceNewlyPressed && !this.isCrouching) { // กระโดดไม่ได้ขณะก้มตัว
+            
+            if (this.jumpCount < this.maxJumps) {
                 
-                // Visuals (White dust for ground jump, Blue burst for air jump)
+                let jumpVelocity = this.jumpPower; // Default is -10 (Jump 1)
+                
+                if (this.jumpCount === 1) { 
+                    // จังหวะกระโดดที่ 2: ใช้แรงกระโดดที่สูงขึ้น!
+                    jumpVelocity = -12; 
+                }
+
+                this.vy = jumpVelocity; 
+                this.isGrounded = false;
+                this.jumpCount++; 
+                
+                // Visuals
                 let pColor = this.jumpCount === 1 ? '#fff' : '#00ffff';
                 createParticles(this.x + this.w/2, this.y + this.h, 5, pColor);
             }
-        } else {
-            this.jumpReleased = true; // Key released, ready for next press
-        }
-
-        // Physics
+        } 
+        
+        // --- 4. Physics & Collision ---
         this.vy += gravity;
         this.x += this.vx;
         this.y += this.vy;
@@ -470,39 +509,38 @@ class Player {
             this.y = floorY - this.h;
             this.vy = 0;
             this.isGrounded = true;
-            this.jumpCount = 0; // Reset jumps
+            this.jumpCount = 0; // รีเซ็ตจำนวนจัมพ์เมื่อแตะพื้น
         }
 
-        // Platform Collision (One-way: only land if falling down)
+        // Platform Collision
         let onPlatform = false;
         platforms.forEach(p => {
-            if (this.vy >= 0 && // Falling
-                this.y + this.h >= p.y && // Feet below top
-                this.y + this.h <= p.y + p.h + 5 && // Feet not too far below top
-                this.x + this.w > p.x && // Within width
+            if (this.vy >= 0 && 
+                this.y + this.h >= p.y && 
+                this.y + this.h <= p.y + p.h + 5 && 
+                this.x + this.w > p.x && 
                 this.x < p.x + p.w) {
                 
                 this.y = p.y - this.h;
                 this.vy = 0;
                 this.isGrounded = true;
-                this.jumpCount = 0; // Reset jumps on platform
+                this.jumpCount = 0; 
                 onPlatform = true;
             }
         });
 
-        // If on floor, we are grounded
+        // Set grounded status
         if (this.y + this.h >= floorY) {
             this.isGrounded = true;
         } else if (!onPlatform) {
-            // If in air and not on platform, not grounded
             this.isGrounded = false;
         }
-
-        // Boundaries
+        
+        // --- 5. Boundaries ---
         if (this.x < 0) this.x = 0;
         if (this.x > canvas.width - this.w) this.x = canvas.width - this.w;
 
-        // Shooting
+        // --- 6. Shooting ---
         if (keys.mouse) {
             if (frames - this.lastShot > this.fireRate) {
                 this.shoot();
@@ -512,10 +550,10 @@ class Player {
     }
 
     shoot() {
-        const bSpeed = 15;
+        const bSpeed = 7; 
         const dir = this.facingRight ? 1 : -1;
         const bx = this.x + (this.facingRight ? this.w : 0);
-        const by = this.y + 25;
+        let by = this.y + (this.isCrouching ? 15 : 25); // ปรับตำแหน่งปืนเมื่อก้มตัว
         
         bullets.push(new Bullet(bx, by, bSpeed * dir, 0, this.damage, true));
         this.x -= dir * 2;
@@ -525,40 +563,47 @@ class Player {
         ctx.save();
         ctx.translate(this.x, this.y);
 
-        // Animation Bobbing
+        // Animation Bobbing (ลดการโยกเมื่อก้มตัว)
         let bob = 0;
-        if (Math.abs(this.vx) > 0.5 && this.isGrounded) {
+        if (Math.abs(this.vx) > 0.5 && this.isGrounded && !this.isCrouching) {
             bob = Math.sin(frames * 0.3) * 3;
         }
 
-        // Legs (Procedural Animation)
+        // Legs/Base
         ctx.fillStyle = '#1c2833';
-        if (this.isGrounded && Math.abs(this.vx) > 0.5) {
+        if (this.isCrouching) {
+            // ก้มตัว: แสดงเป็นฐานกว้าง
+            ctx.fillRect(0, this.h - 10, this.w, 10);
+        } else if (this.isGrounded && Math.abs(this.vx) > 0.5) {
             const legSwing = Math.sin(frames * 0.3) * 10;
             ctx.fillRect(5, 50, 10, 20 + legSwing); // Leg 1
             ctx.fillRect(25, 50, 10, 20 - legSwing); // Leg 2
         } else {
-            // Jump pose
-            ctx.fillRect(5, 50, 10, 15);
-            ctx.fillRect(25, 45, 10, 15);
+            // Jump/Stand pose
+            ctx.fillRect(5, this.h - 20, 10, 15);
+            ctx.fillRect(25, this.h - 25, 10, 15);
         }
 
         // Body
         ctx.fillStyle = this.color;
-        ctx.fillRect(0, 20 + bob, this.w, 30); // Torso
+        let torsoY = this.isCrouching ? 0 + bob : 20 + bob;
+        let torsoH = this.isCrouching ? this.h - 10 : 30;
+        ctx.fillRect(0, torsoY, this.w, torsoH); // Torso
 
-        // Head
+        // Head (อยู่ด้านบนสุดเสมอ)
         ctx.fillStyle = '#f1c40f'; // Helmet
+        let headY = this.isCrouching ? -10 + bob : 10 + bob;
         ctx.beginPath();
-        ctx.arc(this.w/2, 10 + bob, 12, 0, Math.PI * 2);
+        ctx.arc(this.w/2, headY, 12, 0, Math.PI * 2);
         ctx.fill();
 
         // Gun
         ctx.fillStyle = '#333';
+        let gunY = this.isCrouching ? 15 + bob : 25 + bob;
         if (this.facingRight) {
-            ctx.fillRect(20, 25 + bob, 30, 8);
+            ctx.fillRect(20, gunY, 30, 8);
         } else {
-            ctx.fillRect(-10, 25 + bob, 30, 8);
+            ctx.fillRect(-10, gunY, 30, 8);
         }
         
         // Shield Overlay
@@ -625,10 +670,12 @@ class Enemy {
         // Soldiers stay on ground, Drones fly
         this.y = type === 'SOLDIER' ? floorY - this.h : 50 + Math.random() * (floorY - 200);
         this.hp = type === 'SOLDIER' ? 30 + (wave * 5) : 15 + (wave * 3);
-        this.speed = type === 'SOLDIER' ? 2 + (Math.random()) : 4;
+        
+        this.speed = type === 'SOLDIER' ? 0.7 + (Math.random() * 0.5) : 1.4;
+        
         this.color = type === 'SOLDIER' ? '#2ecc71' : '#e74c3c';
         this.lastShot = 0;
-        this.fireRate = type === 'SOLDIER' ? 100 : 80;
+        this.fireRate = type === 'SOLDIER' ? 140 : 120; // เพิ่มความหน่วงขึ้น
     }
     update() {
         this.x -= this.speed;
@@ -637,8 +684,9 @@ class Enemy {
         if (this.x < canvas.width && this.x > 0) {
             if (frames - this.lastShot > this.fireRate) {
                 // Shoot at player
-                let angle = Math.atan2((player.y + player.h/2) - this.y, (player.x + player.w/2) - this.x);
-                let speed = 6;
+                let targetY = player.y + player.h/2; // ยิงไปที่กลางตัวผู้เล่น (ซึ่งอาจจะก้มอยู่)
+                let angle = Math.atan2(targetY - (this.y + this.h/2), (player.x + player.w/2) - this.x);
+                let speed = 4; 
                 enemyBullets.push(new Bullet(this.x, this.y + this.h/2, Math.cos(angle)*speed, Math.sin(angle)*speed, 10, false));
                 this.lastShot = frames + Math.random() * 50;
             }
@@ -667,7 +715,6 @@ class Boss {
         this.x = canvas.width + 100;
         this.y = floorY - this.h - 50; 
         
-        // Base HP is 1000. Scales with wave.
         this.maxHp = 1000 + ((wave - 1) * 500); 
         this.hp = this.maxHp;
         
@@ -683,18 +730,26 @@ class Boss {
     update() {
         if (this.phase === 'ENTER') {
             if (this.x > this.targetX) {
-                this.x -= 2;
+                this.x -= 0.5; 
             } else {
                 this.phase = 'ATTACK';
                 this.timer = frames;
             }
         } else if (this.phase === 'ATTACK') {
-            this.y = (floorY - this.h - 50) + Math.sin(frames * 0.05) * 50;
+            this.y = (floorY - this.h - 50) + Math.sin(frames * 0.03) * 50; 
 
-            if (frames % 60 === 0) {
+            if (frames % 120 === 0) { 
+                // Attack 1: Tri-shot
                 for(let i=-1; i<=1; i++) {
-                    enemyBullets.push(new Bullet(this.x, this.y + this.h/2, -8, i * 2, 15, false));
+                    enemyBullets.push(new Bullet(this.x, this.y + this.h/2, -3.5, i * 1, 15, false)); 
                 }
+            }
+            
+            if (frames % 200 === 0) {
+                // Attack 2: Low shot (ทดสอบการก้มตัว)
+                let speed = 4;
+                let angle = Math.atan2((floorY - player.crouchH/2) - (this.y + this.h/2), player.x - this.x);
+                 enemyBullets.push(new Bullet(this.x, this.y + this.h/2, Math.cos(angle)*speed, Math.sin(angle)*speed, 20, false));
             }
         }
     }
@@ -717,13 +772,11 @@ class Boss {
             score += 1000;
             wave++;
             
-            // Increase next boss threshold (e.g., current score + 1000 more for next wave fight)
-            // or just ensure they need to clear more enemies
             nextBossScore += 2000; 
 
             items.push(new Item(this.x, floorY - 30, 'HEAL'));
             items.push(new Item(this.x + 30, floorY - 30, 'UPGRADE'));
-            items.push(new Item(this.x + 60, floorY - 30, 'SCORE'));
+            items.push(new Item(this.x + 60, floorY - 30, 'SHIELD')); 
             
             document.getElementById('boss-hud').style.display = 'none';
             document.getElementById('score-container').style.display = 'block';
@@ -759,9 +812,6 @@ class Item {
                 this.vy = 0;
                 this.grounded = true;
             }
-            
-            // REMOVED PLATFORM COLLISION FOR ITEMS
-            // Items now fall through platforms to the floor
         }
     }
     draw() {
@@ -825,8 +875,8 @@ function spawnEnemy() {
         let type = Math.random() > 0.7 ? 'DRONE' : 'SOLDIER';
         enemies.push(new Enemy(type));
         
-        let baseDelay = Math.max(40, 150 - (wave * 8)); 
-        enemySpawnTimer = baseDelay + Math.random() * 60; 
+        let baseDelay = Math.max(120, 300 - (wave * 5)); 
+        enemySpawnTimer = baseDelay + Math.random() * 80; 
     }
 }
 
@@ -927,6 +977,7 @@ function checkCollisions() {
     // Enemy Bullets vs Player
     for (let i = enemyBullets.length - 1; i >= 0; i--) {
         let b = enemyBullets[i];
+        // ตรวจสอบการชนกับผู้เล่น
         if (b.x > player.x && b.x < player.x + player.w &&
             b.y > player.y && b.y < player.y + player.h) {
             player.takeDamage(b.damage);
@@ -941,7 +992,6 @@ function checkCollisions() {
             player.y < it.y + it.h && player.y + player.h > it.y) {
             
             if (it.type === 'HEAL') { player.hp = Math.min(player.hp + 30, player.maxHp); showNotification("HEALED!"); }
-            // Upgrade now increases damage by 20
             if (it.type === 'UPGRADE') { player.damage += 20; player.gunLevel++; showNotification("WEAPON UPGRADE (+20 DMG)!"); }
             if (it.type === 'SHIELD') { player.shield = 50; showNotification("SHIELD EQUIPPED!"); }
             if (it.type === 'SCORE') { score += 100; }
@@ -1052,6 +1102,14 @@ function gameLoop() {
     checkCollisions();
     updateHUD();
 
+    // *** FINAL STEP: Update last key states ***
+    keys_last.space = keys.space;
+    keys_last.s = keys.s;
+    keys_last.mouse = keys.mouse;
+    keys_last.a = keys.a;
+    keys_last.d = keys.d;
+    // ****************************************
+
     requestAnimationFrame(gameLoop);
 }
 
@@ -1075,8 +1133,7 @@ function startGame() {
     enemySpawnTimer = 0;
     nextBossScore = 1000; // Reset boss target score
     
-    // Create MORE Random Platforms for Coverage (Increased loop count)
-    // We create 6 potential platforms instead of 3
+    // Create MORE Random Platforms for Coverage
     for(let i=0; i<6; i++) {
         let w = 120 + Math.random() * 150;
         let x = Math.random() * (canvas.width - w);
